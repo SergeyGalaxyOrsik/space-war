@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pixel Squadron</title>
+    <meta name="description" content="Многопользовательский пиксельный космический шутер в реальном времени" />
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="css/style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <h1>PIXEL SQUADRON</h1>
+      <div class="top-actions">
+        <span id="status" class="status" data-state="idle">Ожидание</span>
+        <button id="edit-profile" type="button" class="btn ghost">Пилот: <span id="pilot-name">—</span></button>
+        <button id="mute" type="button" class="btn ghost">Звук</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="stage">
+        <div class="screen">
+          <canvas id="game" aria-label="Игровое поле"></canvas>
+
+          <div id="offline" class="overlay banner" hidden>
+            <strong>СВЯЗЬ ПОТЕРЯНА</strong>
+            <p>Корабль ждёт вас на орбите 90 секунд, очки и эмблема сохранены. Рисовать эмблему можно и сейчас: правки уйдут на сервер после переподключения.</p>
+            <p id="retry-in" class="muted"></p>
+            <button id="retry" type="button" class="btn">Переподключиться</button>
+          </div>
+
+          <div id="kicked" class="overlay" hidden>
+            <div class="card">
+              <strong>ОТКЛЮЧЕНО</strong>
+              <p id="kicked-reason">Сессия открыта в другом окне</p>
+              <button id="reclaim" type="button" class="btn">Вернуть управление сюда</button>
+            </div>
+          </div>
+
+          <div id="join" class="overlay" hidden>
+            <form id="join-form" class="card">
+              <strong>ПОЗЫВНОЙ ПИЛОТА</strong>
+              <input id="name" maxlength="14" autocomplete="nickname" placeholder="Пилот" />
+              <span class="label">Цвет корабля</span>
+              <div id="colors" class="swatches"></div>
+              <button type="submit" class="btn">В БОЙ</button>
+            </form>
+          </div>
+        </div>
+        <p class="hint">Движение — стрелки или WASD · огонь — пробел или J · на телефоне — ведите пальцем по экрану</p>
+      </section>
+
+      <aside class="side">
+        <section class="panel">
+          <h2>Эскадрилья <span class="count" id="online-count">0</span></h2>
+          <ul id="roster" class="list"></ul>
+        </section>
+
+        <section class="panel">
+          <h2>Эмблема</h2>
+          <p class="muted small">Общий холст: рисуют все одновременно, видно сразу.</p>
+          <canvas id="emblem" class="emblem" aria-label="Редактор эмблемы"></canvas>
+          <div id="palette" class="swatches palette"></div>
+          <p id="emblem-info" class="muted small"></p>
+          <p id="emblem-notice" class="notice small" hidden></p>
+        </section>
+
+        <section class="panel">
+          <h2>Рекорды</h2>
+          <ol id="leaderboard" class="list ranked"></ol>
+        </section>
+
+        <section class="panel">
+          <h2>Журнал</h2>
+          <ul id="feed" class="list feed"></ul>
+        </section>
+      </aside>
+    </main>
+
+    <script src="config.js"></script>
+    <script type="module" src="js/main.js"></script>
+  </body>
+</html>

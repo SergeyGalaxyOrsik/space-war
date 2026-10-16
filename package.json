@@ -1,0 +1,19 @@
+{
+  "name": "pixel-space-shooter",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Многопользовательский пиксельный космический шутер на WebSockets",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node --test",
+    "build:static": "node scripts/write-config.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
