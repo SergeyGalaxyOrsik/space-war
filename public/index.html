@@ -2,8 +2,9 @@
 <html lang="ru">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Pixel Squadron</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b0d1a" />
+    <title>Space War</title>
     <meta name="description" content="Многопользовательский пиксельный космический шутер в реальном времени" />
     <link rel="icon" href="favicon.svg" type="image/svg+xml" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -13,18 +14,60 @@
   </head>
   <body>
     <header class="top">
-      <h1>PIXEL SQUADRON</h1>
+      <h1>SPACE WAR</h1>
       <div class="top-actions">
-        <span id="status" class="status" data-state="idle">Ожидание</span>
-        <button id="edit-profile" type="button" class="btn ghost">Пилот: <span id="pilot-name">—</span></button>
+        <span id="room-label" class="room-label" hidden></span>
+        <button id="to-lobby" type="button" class="btn ghost" hidden>← Комнаты</button>
+        <span id="status" class="status" data-state="idle">Лобби</span>
         <button id="mute" type="button" class="btn ghost">Звук</button>
       </div>
     </header>
 
-    <main class="layout">
+    <main id="lobby" class="lobby">
+      <section class="panel">
+        <h2>Пилот</h2>
+        <label class="field">
+          <span class="label">Позывной</span>
+          <input id="name" maxlength="14" autocomplete="nickname" placeholder="Пилот" />
+        </label>
+        <span class="label">Цвет корабля</span>
+        <div id="colors" class="swatches"></div>
+      </section>
+
+      <section class="panel rooms-panel">
+        <h2>Комнаты <button id="refresh-rooms" type="button" class="link">обновить</button></h2>
+        <p id="lobby-error" class="notice small" hidden></p>
+        <ul id="rooms" class="rooms"></ul>
+      </section>
+
+      <section class="panel">
+        <h2>Новая комната</h2>
+        <form id="create-room" class="stack">
+          <label class="field">
+            <span class="label">Название</span>
+            <input id="room-name" maxlength="24" required placeholder="Например, Орбита-7" />
+          </label>
+          <fieldset class="choice">
+            <label><input type="radio" name="visibility" value="public" checked /> Публичная</label>
+            <label><input type="radio" name="visibility" value="private" /> Приватная</label>
+          </fieldset>
+          <label id="room-password-field" class="field" hidden>
+            <span class="label">Пароль</span>
+            <input id="room-password" type="password" maxlength="64" autocomplete="new-password" />
+          </label>
+          <button type="submit" class="btn">Создать и войти</button>
+        </form>
+      </section>
+    </main>
+
+    <main id="game-view" class="layout" hidden>
       <section class="stage">
-        <div class="screen">
+        <div id="screen" class="screen">
           <canvas id="game" aria-label="Игровое поле"></canvas>
+          <button id="fullscreen" type="button" class="fs-btn" aria-label="На весь экран" title="На весь экран">
+            <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M0 0h4v1H1v3H0zM6 0h4v4H9V1H6zM0 6h1v3h3v1H0zM9 6h1v4H6V9h3z" /></svg>
+          </button>
+          <div id="rotate-hint" class="rotate-hint">Поверните телефон горизонтально</div>
 
           <div id="offline" class="overlay banner" hidden>
             <strong>СВЯЗЬ ПОТЕРЯНА</strong>
@@ -40,16 +83,6 @@
               <button id="reclaim" type="button" class="btn">Вернуть управление сюда</button>
             </div>
           </div>
-
-          <div id="join" class="overlay" hidden>
-            <form id="join-form" class="card">
-              <strong>ПОЗЫВНОЙ ПИЛОТА</strong>
-              <input id="name" maxlength="14" autocomplete="nickname" placeholder="Пилот" />
-              <span class="label">Цвет корабля</span>
-              <div id="colors" class="swatches"></div>
-              <button type="submit" class="btn">В БОЙ</button>
-            </form>
-          </div>
         </div>
         <p class="hint">Движение — стрелки или WASD · огонь — пробел или J · на телефоне — ведите пальцем по экрану</p>
       </section>
@@ -62,7 +95,7 @@
 
         <section class="panel">
           <h2>Эмблема</h2>
-          <p class="muted small">Общий холст: рисуют все одновременно, видно сразу.</p>
+          <p class="muted small">Общий холст комнаты: рисуют все одновременно.</p>
           <canvas id="emblem" class="emblem" aria-label="Редактор эмблемы"></canvas>
           <div id="palette" class="swatches palette"></div>
           <p id="emblem-info" class="muted small"></p>
@@ -70,7 +103,7 @@
         </section>
 
         <section class="panel">
-          <h2>Рекорды</h2>
+          <h2>Рекорды комнаты</h2>
           <ol id="leaderboard" class="list ranked"></ol>
         </section>
 
@@ -81,7 +114,6 @@
       </aside>
     </main>
 
-    <script src="config.js"></script>
     <script type="module" src="js/main.js"></script>
   </body>
 </html>

@@ -2,7 +2,6 @@
 // всё остальное (движение, стрельба, попадания, бонусы, волны) считает сервер
 // и 30 раз в секунду рассылает снимок состояния всем участникам.
 
-import { randomBytes, randomUUID } from 'node:crypto';
 import {
   BULLET_SPEED, DT, FIRE_COOLDOWN, INVULN_SECONDS, KEY, MAX_WEAPON_LEVEL, OFFLINE_GRACE_MS,
   PLAYER_MAX_HP, PLAYER_RADIUS, RESPAWN_SECONDS, SHIELD_SECONDS, SHIP_COLORS, TICK_RATE, WORLD_H, WORLD_W,
@@ -83,8 +82,9 @@ export class Player {
 }
 
 export class Game {
-  constructor({ store, now = () => Date.now(), random = Math.random } = {}) {
+  constructor({ store, room = { id: 'main', name: 'Общий сектор', isPrivate: false }, now = () => Date.now(), random = Math.random } = {}) {
     this.store = store;
+    this.room = room;
     this.now = now;
     this.random = random;
     this.players = new Map();
@@ -109,7 +109,7 @@ export class Game {
 
   load() {
     if (!this.store) return;
-    const world = this.store.getJson('world');
+    const world = this.store.getJson(`world:${this.room.id}`);
     if (world) {
       this.tick = world.tick ?? 0;
       this.nextId = world.nextId ?? 1;
@@ -121,30 +121,31 @@ export class Game {
       this.powerups = world.powerups ?? [];
       this.totalKills = world.totalKills ?? 0;
     }
-    const emblem = this.store.getJson('emblem');
+    const emblem = this.store.getJson(`emblem:${this.room.id}`);
     if (emblem?.cells?.length === this.emblem.cells.length) this.emblem = emblem;
-    this.leaderboard = this.store.topRuns();
+    this.leaderboard = this.store.topRuns(this.room.id);
   }
 
   save() {
     if (!this.store) return;
     this.store.transaction(() => {
-      this.store.setJson('world', {
+      this.store.setJson(`world:${this.room.id}`, {
         tick: this.tick, nextId: this.nextId, wave: this.wave, waveState: this.waveState,
         waveTimer: this.waveTimer, spawnQueue: this.spawnQueue, enemies: this.enemies,
         powerups: this.powerups, totalKills: this.totalKills,
       });
-      this.store.setJson('emblem', this.emblem);
-      for (const p of this.players.values()) this.store.savePlayer(p);
+      this.store.setJson(`emblem:${this.room.id}`, this.emblem);
+      for (const p of this.players.values()) this.store.savePlayer(p, this.room.id);
+      if (this.onlineCount() > 0) this.store.touchRoom(this.room.id);
     });
   }
 
   // ---------- подключения ----------
 
   // conn: { send(msgOrString), close(code, reason) }
-  join(conn, hello) {
-    const token = typeof hello.token === 'string' && hello.token.length <= 64 ? hello.token : null;
-    let player = token ? this.byToken.get(token) : null;
+  // identity: { token, id, name, color, best, totalKills } — пилот уже опознан менеджером комнат.
+  join(conn, identity) {
+    let player = this.byToken.get(identity.token);
 
     if (player) {
       // Тот же игрок переподключился (обрыв связи или вторая вкладка с тем же токеном).
@@ -153,21 +154,14 @@ export class Game {
         player.conn.close(4000, 'replaced');
       }
     } else {
-      const row = token ? this.store?.getPlayer(token) : null;
-      if (row) {
-        player = new Player({ token, id: row.id, name: row.name, color: row.color, totalKills: row.total_kills, best: row.best_score });
-        player.restoreState(row.state);
-      } else {
-        const fresh = { token: randomUUID(), id: randomBytes(4).toString('hex') };
-        player = new Player({ ...fresh, name: 'Пилот', color: SHIP_COLORS[0] });
-        this.store?.createPlayer(fresh.token, fresh.id, player.name, player.color);
-      }
+      player = new Player({ ...identity });
+      player.restoreState(this.store?.getRoomState(this.room.id, identity.token).state);
       this.players.set(player.id, player);
       this.byToken.set(player.token, player);
     }
 
-    if (hello.name) player.name = sanitizeName(hello.name);
-    if (SHIP_COLORS.includes(hello.color)) player.color = hello.color;
+    player.name = sanitizeName(identity.name);
+    if (SHIP_COLORS.includes(identity.color)) player.color = identity.color;
 
     const wasOffline = !player.online;
     player.conn = conn;
@@ -185,6 +179,7 @@ export class Game {
       t: 'welcome',
       token: player.token,
       id: player.id,
+      room: { id: this.room.id, name: this.room.name, isPrivate: this.room.isPrivate },
       tickRate: TICK_RATE,
       tick: this.tick,
       emblem: this.emblem,
@@ -202,7 +197,7 @@ export class Game {
     player.online = false;
     player.offlineSince = this.now();
     player.inputs = [];
-    this.store?.savePlayer(player);
+    this.store?.savePlayer(player, this.room.id);
     this.feed(`${player.name} потерял связь`);
     this.broadcast({ t: 'roster', players: this.roster() });
   }
@@ -261,7 +256,7 @@ export class Game {
 
     for (const p of this.players.values()) {
       if (!p.online && now - p.offlineSince > OFFLINE_GRACE_MS) {
-        this.store?.savePlayer(p);
+        this.store?.savePlayer(p, this.room.id);
         this.players.delete(p.id);
         this.byToken.delete(p.token);
         this.broadcast({ t: 'roster', players: this.roster() });
@@ -552,10 +547,10 @@ export class Game {
     this.events.push({ k: 'boom', x: Math.round(p.x), y: Math.round(p.y), s: 12, id: p.id });
     this.feed(`${p.name} сбит (${p.score} очк.)`);
     if (p.score > 0) {
-      this.store?.addRun({ playerId: p.id, name: p.name, score: p.score, kills: p.kills, wave: this.wave });
-      this.store?.savePlayer(p);
+      this.store?.addRun({ playerId: p.id, name: p.name, score: p.score, kills: p.kills, wave: this.wave, roomId: this.room.id });
+      this.store?.savePlayer(p, this.room.id);
       if (this.store) {
-        this.leaderboard = this.store.topRuns();
+        this.leaderboard = this.store.topRuns(this.room.id);
         this.broadcast({ t: 'leaderboard', top: this.leaderboard });
       }
     }

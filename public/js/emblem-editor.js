@@ -23,10 +23,10 @@ export class EmblemEditor extends EventTarget {
     this.myId = null;
     this.names = new Map();
 
-    const cached = load('emblem', null);
-    this.confirmed = cached?.cells?.length === EMBLEM_SIZE * EMBLEM_SIZE ? cached : createEmblem();
-    this.pending = load('emblemPending', []).map((op) => ({ ...op, sent: false }));
-    this.lamport = Math.max(this.confirmed.lamport, ...this.pending.map((op) => op.t), 0);
+    this.roomId = null;
+    this.confirmed = createEmblem();
+    this.pending = [];
+    this.lamport = 0;
     this.color = load('emblemColor', 8);
     this.flash = new Map();
     this.hover = -1;
@@ -53,6 +53,17 @@ export class EmblemEditor extends EventTarget {
     );
     this.swatches = [...root.children];
     this.pick(this.color);
+  }
+
+  // У каждой комнаты своя эмблема и своя офлайн-очередь правок.
+  setRoom(roomId) {
+    this.roomId = roomId;
+    const cached = load(`emblem.${roomId}`, null);
+    this.confirmed = cached?.cells?.length === EMBLEM_SIZE * EMBLEM_SIZE ? cached : createEmblem();
+    this.pending = load(`emblemPending.${roomId}`, []).map((op) => ({ ...op, sent: false }));
+    this.lamport = Math.max(this.confirmed.lamport, ...this.pending.map((op) => op.t), 0);
+    this.flash.clear();
+    this.rebuild();
   }
 
   pick(idx) {
@@ -103,7 +114,7 @@ export class EmblemEditor extends EventTarget {
   }
 
   paint(i) {
-    if (this.view.cells[i].c === this.color) return;
+    if (!this.roomId || this.view.cells[i].c === this.color) return;
     this.lamport = Math.max(this.lamport, this.confirmed.lamport) + 1;
     this.pending.push({ i, c: this.color, t: this.lamport, by: this.myId ?? '~', sent: false });
     this.persist();
@@ -178,8 +189,9 @@ export class EmblemEditor extends EventTarget {
   }
 
   persist() {
-    save('emblem', this.confirmed);
-    save('emblemPending', this.pending.map(({ i, c, t, by }) => ({ i, c, t, by })));
+    if (!this.roomId) return;
+    save(`emblem.${this.roomId}`, this.confirmed);
+    save(`emblemPending.${this.roomId}`, this.pending.map(({ i, c, t, by }) => ({ i, c, t, by })));
   }
 
   say(text) {

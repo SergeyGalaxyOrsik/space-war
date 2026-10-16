@@ -51,12 +51,47 @@ function client() {
 
 test('отдаёт статику и health', async () => {
   const html = await fetch(`http://${base}/`).then((r) => r.text());
-  assert.match(html, /PIXEL SQUADRON/);
+  assert.match(html, /SPACE WAR/);
   const shared = await fetch(`http://${base}/js/shared/constants.js`);
   assert.equal(shared.status, 200);
   const escape = await fetch(`http://${base}/..%2fpackage.json`);
   assert.notEqual(escape.status, 200);
   assert.equal((await fetch(`http://${base}/health`).then((r) => r.json())).ok, true);
+});
+
+test('API комнат: список, создание, ошибки', async () => {
+  const list = await fetch(`http://${base}/api/rooms`).then((r) => r.json());
+  assert.equal(list.rooms[0].id, 'main');
+  const bad = await fetch(`http://${base}/api/rooms`, { method: 'POST', body: '{"name":""}' });
+  assert.equal(bad.status, 400);
+  const res = await fetch(`http://${base}/api/rooms`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Приват', isPrivate: true, password: 'secret' }),
+  });
+  assert.equal(res.status, 201);
+  const { room } = await res.json();
+
+  const c = client();
+  await c.opened;
+  c.send({ t: 'hello', name: 'Guest', room: room.id, password: 'nope' });
+  const denied = await c.wait((m) => m.t === 'denied');
+  assert.equal(denied.code, 'password');
+
+  const ok = client();
+  await ok.opened;
+  ok.send({ t: 'hello', token: denied.token, name: 'Guest', room: room.id, password: 'secret' });
+  const welcome = await ok.wait((m) => m.t === 'welcome');
+  assert.equal(welcome.room.id, room.id);
+  assert.equal(welcome.room.isPrivate, true);
+  ok.ws.close();
+
+  // Тот же пилот возвращается без пароля.
+  const back = client();
+  await back.opened;
+  back.send({ t: 'hello', token: denied.token, room: room.id });
+  assert.equal((await back.wait((m) => m.t === 'welcome')).room.id, room.id);
+  back.ws.close();
 });
 
 test('два игрока видят друг друга и правки эмблемы в реальном времени', async () => {

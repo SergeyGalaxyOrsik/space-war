@@ -7,7 +7,7 @@ import { extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
 import { TICK_MS } from '../public/js/shared/constants.js';
-import { Game } from './game.js';
+import { RoomError, RoomManager } from './rooms.js';
 import { Store } from './store.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -25,19 +25,26 @@ const MIME = {
 };
 
 const HELLO_TIMEOUT_MS = 5000;
+const MAX_JSON_BODY = 4096;
+const CLEANUP_EVERY_MS = 3600_000;
 const MAX_MESSAGES_PER_SECOND = 120;
 const MAX_BUFFERED_BYTES = 1 << 20;
 
 export function startServer({ port = 3000, host = '0.0.0.0', dbFile = join(ROOT, 'data', 'game.db') } = {}) {
   const store = new Store(dbFile);
-  const game = new Game({ store });
+  const rooms = new RoomManager({ store });
+  rooms.cleanup();
 
-  const server = createServer((req, res) => serveStatic(req, res, game));
+  const server = createServer((req, res) => {
+    if (req.url.startsWith('/api/')) handleApi(req, res, rooms);
+    else serveStatic(req, res, rooms);
+  });
   const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 64 * 1024 });
   let closing = false;
 
   wss.on('connection', (ws) => {
     let player = null;
+    let game = null;
     let messages = 0;
     let windowStart = Date.now();
     ws.isAlive = true;
@@ -77,9 +84,18 @@ export function startServer({ port = 3000, host = '0.0.0.0', dbFile = join(ROOT,
         return;
       }
       if (!player) {
-        if (msg?.t !== 'hello') return;
+        if (msg?.t !== 'hello' || game) return;
         clearTimeout(helloTimer);
-        player = game.join(conn, msg);
+        const identity = rooms.identify(msg);
+        try {
+          game = rooms.enter(typeof msg.room === 'string' ? msg.room : 'main', identity, msg.password);
+        } catch (err) {
+          if (!(err instanceof RoomError)) throw err;
+          conn.send({ t: 'denied', code: err.code, message: err.message, token: identity.token });
+          ws.close(4003, err.code);
+          return;
+        }
+        player = game.join(conn, identity);
         return;
       }
       game.handle(player, msg);
@@ -111,7 +127,7 @@ export function startServer({ port = 3000, host = '0.0.0.0', dbFile = join(ROOT,
     const now = performance.now();
     let steps = 0;
     while (now >= next && steps < 5) {
-      game.step();
+      rooms.step();
       next += TICK_MS;
       steps++;
     }
@@ -119,6 +135,7 @@ export function startServer({ port = 3000, host = '0.0.0.0', dbFile = join(ROOT,
     loop = setTimeout(scheduleTick, Math.max(0, next - performance.now()));
   };
   scheduleTick();
+  const cleanup = setInterval(() => rooms.cleanup(), CLEANUP_EVERY_MS);
 
   server.listen(port, host);
 
@@ -127,23 +144,64 @@ export function startServer({ port = 3000, host = '0.0.0.0', dbFile = join(ROOT,
       closing = true;
       clearTimeout(loop);
       clearInterval(heartbeat);
+      clearInterval(cleanup);
       for (const ws of wss.clients) ws.terminate();
       wss.close();
       server.close(() => {
-        game.save();
+        rooms.saveAll();
         store.close();
         done();
       });
     });
 
-  return { server, wss, game, store, close };
+  return { server, wss, rooms, store, close };
 }
 
-async function serveStatic(req, res, game) {
+function sendJson(res, status, body) {
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+  res.end(JSON.stringify(body));
+}
+
+function handleApi(req, res, rooms) {
+  const { pathname } = new URL(req.url, 'http://localhost');
+  if (pathname !== '/api/rooms') return sendJson(res, 404, { error: 'Не найдено' });
+  if (req.method === 'GET') return sendJson(res, 200, { rooms: rooms.list() });
+  if (req.method !== 'POST') return sendJson(res, 405, { error: 'Метод не поддерживается' });
+
+  let body = '';
+  let tooBig = false;
+  req.setEncoding('utf8');
+  req.on('data', (chunk) => {
+    body += chunk;
+    if (body.length > MAX_JSON_BODY) {
+      tooBig = true;
+      sendJson(res, 413, { error: 'Слишком большой запрос' });
+      req.destroy();
+    }
+  });
+  req.on('end', () => {
+    if (tooBig) return;
+    let data;
+    try {
+      data = JSON.parse(body);
+    } catch {
+      return sendJson(res, 400, { error: 'Некорректный JSON' });
+    }
+    try {
+      const room = rooms.create({ name: data?.name, isPrivate: data?.isPrivate === true, password: data?.password });
+      sendJson(res, 201, { room });
+    } catch (err) {
+      if (!(err instanceof RoomError)) throw err;
+      sendJson(res, err.code === 'rate' || err.code === 'full' ? 429 : 400, { error: err.message, code: err.code });
+    }
+  });
+}
+
+async function serveStatic(req, res, rooms) {
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname === '/health') {
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, players: game.onlineCount(), wave: game.wave }));
+    const list = rooms.list();
+    sendJson(res, 200, { ok: true, rooms: list.length, players: list.reduce((n, r) => n + r.online, 0) });
     return;
   }
   if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -184,7 +242,7 @@ async function serveStatic(req, res, game) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT) || 3000;
   const app = startServer({ port, dbFile: process.env.DB_FILE || undefined });
-  app.server.on('listening', () => console.log(`Pixel Space Shooter: http://localhost:${port}`));
+  app.server.on('listening', () => console.log(`Space War: http://localhost:${port}`));
   const shutdown = async () => {
     await app.close();
     process.exit(0);

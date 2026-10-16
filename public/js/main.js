@@ -5,12 +5,13 @@ import { Input } from './input.js';
 import { Net } from './net.js';
 import { Renderer } from './render.js';
 import { SHIP_COLORS, TICK_MS, sanitizeName } from './shared/constants.js';
-import { load, save } from './storage.js';
+import { load, save, sessionLoad, sessionSave } from './storage.js';
 import { World } from './world.js';
 
 const $ = (sel) => document.querySelector(sel);
 
 const canvas = $('#game');
+const screenEl = $('#screen');
 const renderer = new Renderer(canvas);
 const input = new Input(canvas);
 const world = new World();
@@ -25,16 +26,32 @@ emblem.addEventListener('change', (e) => renderer.setEmblem(e.detail));
 renderer.setEmblem(emblem.view.cells);
 
 let profile = load('profile', null);
+let chosenColor = profile?.color ?? SHIP_COLORS[Math.floor(Math.random() * SHIP_COLORS.length)];
 let token = null;
-let net = null;
+let currentRoom = null; // { id, name }
+let joinPassword = null;
+let promptRoom = null; // комната, для которой открыто поле пароля
+let focusPrompt = false;
+
+const net = new Net({
+  getHello: () => ({
+    t: 'hello',
+    token,
+    name: profile?.name,
+    color: profile?.color,
+    room: currentRoom?.id,
+    password: joinPassword ?? undefined,
+  }),
+});
+emblem.send = (msg) => net.send(msg);
+net.addEventListener('status', (e) => onStatus(e.detail));
+net.addEventListener('message', (e) => onMessage(e.detail));
 
 // ---------- профиль ----------
 
-const joinDialog = $('#join');
 const nameInput = $('#name');
+nameInput.value = profile?.name ?? '';
 const colorsRoot = $('#colors');
-let chosenColor = profile?.color ?? SHIP_COLORS[Math.floor(Math.random() * SHIP_COLORS.length)];
-
 colorsRoot.replaceChildren(
   ...SHIP_COLORS.map((color) => {
     const btn = document.createElement('button');
@@ -45,6 +62,7 @@ colorsRoot.replaceChildren(
     btn.addEventListener('click', () => {
       chosenColor = color;
       markColor();
+      saveProfile();
     });
     return btn;
   }),
@@ -52,24 +70,206 @@ colorsRoot.replaceChildren(
 function markColor() {
   [...colorsRoot.children].forEach((el, i) => el.classList.toggle('active', SHIP_COLORS[i] === chosenColor));
 }
+markColor();
+nameInput.addEventListener('change', saveProfile);
 
-function openProfile() {
-  nameInput.value = profile?.name ?? '';
-  markColor();
-  joinDialog.hidden = false;
-  nameInput.focus();
-}
-
-$('#join-form').addEventListener('submit', (e) => {
-  e.preventDefault();
+function saveProfile() {
   profile = { name: sanitizeName(nameInput.value), color: chosenColor };
   save('profile', profile);
-  joinDialog.hidden = true;
-  $('#pilot-name').textContent = profile.name;
-  if (net) net.send({ t: 'profile', ...profile });
-  else start();
+}
+
+// ---------- лобби ----------
+
+const lobbyEl = $('#lobby');
+const gameEl = $('#game-view');
+const lobbyError = $('#lobby-error');
+let rooms = [];
+
+function showLobby(error) {
+  lobbyEl.hidden = false;
+  gameEl.hidden = true;
+  $('#to-lobby').hidden = true;
+  $('#room-label').hidden = true;
+  lobbyError.hidden = !error;
+  lobbyError.textContent = error ?? '';
+  refreshRooms();
+}
+
+function showGame() {
+  lobbyEl.hidden = true;
+  gameEl.hidden = false;
+  $('#to-lobby').hidden = false;
+}
+
+async function refreshRooms() {
+  try {
+    const res = await fetch('/api/rooms', { cache: 'no-store' });
+    rooms = (await res.json()).rooms;
+    renderRooms();
+  } catch {
+    // нет связи — оставляем прошлый список
+  }
+}
+setInterval(() => {
+  if (!lobbyEl.hidden && document.visibilityState === 'visible') refreshRooms();
+}, 4000);
+$('#refresh-rooms').addEventListener('click', refreshRooms);
+
+function renderRooms() {
+  const list = $('#rooms');
+  if (!rooms.length) {
+    const li = document.createElement('li');
+    li.className = 'muted';
+    li.textContent = 'Комнат пока нет';
+    list.replaceChildren(li);
+    return;
+  }
+  // Список обновляется по таймеру — не теряем пароль, который человек сейчас вводит.
+  const typing = list.querySelector('.password-row input');
+  const draft = typing?.value ?? '';
+  const focused = typing && document.activeElement === typing;
+  list.replaceChildren(...rooms.map(roomItem));
+  const fresh = list.querySelector('.password-row input');
+  if (fresh) {
+    fresh.value = draft;
+    if (focused || focusPrompt) fresh.focus();
+    focusPrompt = false;
+  }
+}
+
+function roomItem(room) {
+  const li = document.createElement('li');
+  li.className = 'room';
+  if (room.id === promptRoom) li.classList.add('open');
+
+  const title = document.createElement('div');
+  title.className = 'room-title';
+  const name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = room.name;
+  const badge = document.createElement('span');
+  badge.className = room.isPrivate ? 'tag private' : 'tag';
+  badge.textContent = room.isPrivate ? 'приватная' : 'публичная';
+  title.append(name, badge);
+
+  const meta = document.createElement('span');
+  meta.className = 'meta';
+  meta.textContent = `${room.online} в игре${room.wave ? ` · волна ${room.wave}` : ''}`;
+
+  const join = document.createElement('button');
+  join.type = 'button';
+  join.className = 'btn small';
+  join.textContent = 'Войти';
+  join.addEventListener('click', () => {
+    // Сначала пробуем без пароля: если пилот уже бывал в комнате, сервер пустит.
+    enterRoom(room, null);
+  });
+
+  li.append(title, meta, join);
+
+  if (room.id === promptRoom) {
+    const form = document.createElement('form');
+    form.className = 'password-row';
+    const pass = document.createElement('input');
+    pass.type = 'password';
+    pass.placeholder = 'Пароль комнаты';
+    pass.maxLength = 64;
+    pass.autocomplete = 'current-password';
+    pass.required = true;
+    const ok = document.createElement('button');
+    ok.type = 'submit';
+    ok.className = 'btn small';
+    ok.textContent = 'OK';
+    form.append(pass, ok);
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      enterRoom(room, pass.value);
+    });
+    li.append(form);
+  }
+  return li;
+}
+
+const passwordField = $('#room-password-field');
+document.querySelectorAll('input[name="visibility"]').forEach((radio) => {
+  radio.addEventListener('change', () => {
+    passwordField.hidden = $('input[name="visibility"]:checked').value !== 'private';
+    $('#room-password').required = !passwordField.hidden;
+  });
 });
-$('#edit-profile').addEventListener('click', openProfile);
+
+$('#create-room').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const isPrivate = $('input[name="visibility"]:checked').value === 'private';
+  const password = $('#room-password').value;
+  try {
+    const res = await fetch('/api/rooms', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: $('#room-name').value, isPrivate, password: isPrivate ? password : undefined }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? 'Не удалось создать комнату');
+    e.target.reset();
+    passwordField.hidden = true;
+    enterRoom(data.room, isPrivate ? password : null);
+  } catch (err) {
+    lobbyError.textContent = err.message === 'Failed to fetch' ? 'Нет связи с сервером' : err.message;
+    lobbyError.hidden = false;
+  }
+});
+
+// ---------- вход и выход ----------
+
+function enterRoom(room, password) {
+  saveProfile();
+  currentRoom = { id: room.id, name: room.name ?? '' };
+  joinPassword = password || null;
+  promptRoom = null;
+  world.myId = null;
+  world.reset();
+  roster.clear();
+  setRoster([]);
+  setLeaderboard([]);
+  $('#feed').replaceChildren();
+  emblem.setRoom(room.id);
+  restoreLastState(room.id);
+  setRoomLabel();
+  showGame();
+  net.open();
+}
+
+function leaveRoom(error) {
+  net.close();
+  exitFullscreen();
+  currentRoom = null;
+  joinPassword = null;
+  sessionSave('room', '');
+  history.replaceState(null, '', location.pathname);
+  showLobby(error);
+}
+$('#to-lobby').addEventListener('click', () => leaveRoom());
+
+function setRoomLabel() {
+  const label = $('#room-label');
+  label.hidden = !currentRoom;
+  label.textContent = currentRoom ? currentRoom.name : '';
+}
+
+// Последнее известное состояние комнаты: показываем сразу, даже если сервер недоступен.
+function restoreLastState(roomId) {
+  const last = load(`last.${roomId}`, null);
+  if (!last?.raw) return;
+  try {
+    world.myId = last.id;
+    world.push(last.raw);
+    world.renderTick = last.raw.n;
+    world.frozen = true;
+    setRoster(last.roster ?? []);
+  } catch {
+    world.reset();
+  }
+}
 
 // ---------- звук ----------
 
@@ -83,17 +283,7 @@ muteBtn.addEventListener('click', () => {
 });
 renderMute();
 
-// ---------- сеть ----------
-
-async function start() {
-  $('#pilot-name').textContent = profile.name;
-  token = await acquireToken();
-  net = new Net({ getHello: () => ({ t: 'hello', token, name: profile.name, color: profile.color }) });
-  emblem.send = (msg) => net.send(msg);
-  net.addEventListener('status', (e) => onStatus(e.detail));
-  net.addEventListener('message', (e) => onMessage(e.detail));
-  net.connect();
-}
+// ---------- сообщения сервера ----------
 
 let lastSavedAt = 0;
 
@@ -103,23 +293,36 @@ function onMessage(msg) {
       const snap = world.push(msg);
       for (const ev of snap.events) handleEvent(ev);
       const now = performance.now();
-      if (now - lastSavedAt > 1000) {
+      if (currentRoom && now - lastSavedAt > 1000) {
         lastSavedAt = now;
-        save('last', { id: world.myId, raw: msg, roster: [...roster.values()], at: Date.now() });
+        save(`last.${currentRoom.id}`, { id: world.myId, raw: msg, roster: [...roster.values()], at: Date.now() });
       }
       break;
     }
     case 'welcome':
-      if (msg.token !== token) {
-        token = msg.token;
-        adoptToken(token);
-      }
+      adopt(msg.token);
+      currentRoom = msg.room;
+      joinPassword = null;
+      sessionSave('room', msg.room.id);
+      history.replaceState(null, '', `#room=${encodeURIComponent(msg.room.id)}`);
+      setRoomLabel();
       world.myId = msg.id;
       world.reset();
       setRoster(msg.roster);
       setLeaderboard(msg.leaderboard);
       emblem.welcome(msg.id, msg.emblem);
       break;
+    case 'denied': {
+      adopt(msg.token);
+      const roomId = currentRoom?.id;
+      leaveRoom(msg.message);
+      if (msg.code === 'password') {
+        promptRoom = roomId;
+        focusPrompt = true;
+        renderRooms();
+      }
+      break;
+    }
     case 'roster':
       setRoster(msg.players);
       break;
@@ -138,6 +341,13 @@ function onMessage(msg) {
     case 'kicked':
       $('#kicked-reason').textContent = msg.reason;
       break;
+  }
+}
+
+function adopt(newToken) {
+  if (newToken && newToken !== token) {
+    token = newToken;
+    adoptToken(token);
   }
 }
 
@@ -169,23 +379,25 @@ function onStatus(state) {
   world.frozen = state !== 'online';
   const badge = $('#status');
   badge.dataset.state = state;
-  badge.textContent = { connecting: 'Подключение…', online: 'В сети', offline: 'Нет связи', kicked: 'Отключено' }[state] ?? state;
+  badge.textContent = {
+    idle: 'Лобби', connecting: 'Подключение…', online: 'В сети', offline: 'Нет связи', kicked: 'Отключено', denied: 'Нет доступа',
+  }[state] ?? state;
   $('#offline').hidden = state !== 'offline' && state !== 'connecting';
   $('#kicked').hidden = state !== 'kicked';
   if (state === 'online') addFeed('Связь установлена');
 }
 
 setInterval(() => {
-  if (!net || net.state !== 'offline') {
-    $('#retry-in').textContent = net?.state === 'connecting' ? 'Подключаемся…' : '';
+  if (net.state !== 'offline') {
+    $('#retry-in').textContent = net.state === 'connecting' ? 'Подключаемся…' : '';
     return;
   }
   const sec = Math.max(0, Math.ceil((net.retryAt - performance.now()) / 1000));
   const reason = navigator.onLine ? '' : ' Интернет недоступен.';
   $('#retry-in').textContent = `Повтор через ${sec} с (попытка ${net.attempt}).${reason}`;
 }, 250);
-$('#retry').addEventListener('click', () => net?.reconnectNow());
-$('#reclaim').addEventListener('click', () => net?.reconnectNow());
+$('#retry').addEventListener('click', () => net.reconnectNow());
+$('#reclaim').addEventListener('click', () => net.reconnectNow());
 
 // ---------- панели ----------
 
@@ -247,6 +459,56 @@ function addFeed(text) {
   while (list.children.length > 8) list.lastChild.remove();
 }
 
+// ---------- полный экран ----------
+// Fullscreen API там, где он есть (Android, десктоп, iPad); на iPhone Safari
+// его для обычных элементов нет — растягиваем поле стилями поверх страницы.
+
+const nativeFsElement = () => document.fullscreenElement ?? document.webkitFullscreenElement ?? null;
+
+function isFullscreen() {
+  return nativeFsElement() === screenEl || screenEl.classList.contains('pseudo-fs');
+}
+
+async function enterFullscreen() {
+  const request = screenEl.requestFullscreen ?? screenEl.webkitRequestFullscreen;
+  if (request) {
+    try {
+      await request.call(screenEl, { navigationUI: 'hide' });
+      await screen.orientation?.lock?.('landscape').catch(() => {});
+      return;
+    } catch {
+      // браузер отказал — используем запасной вариант
+    }
+  }
+  screenEl.classList.add('pseudo-fs');
+  document.body.classList.add('no-scroll');
+  syncFullscreen();
+}
+
+function exitFullscreen() {
+  if (nativeFsElement()) (document.exitFullscreen ?? document.webkitExitFullscreen)?.call(document);
+  screenEl.classList.remove('pseudo-fs');
+  document.body.classList.remove('no-scroll');
+  screen.orientation?.unlock?.();
+  syncFullscreen();
+}
+
+function syncFullscreen() {
+  const on = isFullscreen();
+  screenEl.classList.toggle('is-fs', on);
+  const btn = $('#fullscreen');
+  btn.setAttribute('aria-label', on ? 'Выйти из полноэкранного режима' : 'На весь экран');
+  btn.title = btn.getAttribute('aria-label');
+  btn.classList.toggle('active', on);
+}
+
+$('#fullscreen').addEventListener('click', () => (isFullscreen() ? exitFullscreen() : enterFullscreen()));
+document.addEventListener('fullscreenchange', syncFullscreen);
+document.addEventListener('webkitfullscreenchange', syncFullscreen);
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && screenEl.classList.contains('pseudo-fs')) exitFullscreen();
+});
+
 // ---------- игровой цикл ----------
 
 let last = performance.now();
@@ -258,36 +520,40 @@ function frame(now) {
   acc += dt * 1000;
   while (acc >= TICK_MS) {
     acc -= TICK_MS;
-    if (net?.online) {
+    if (net.online) {
       const inp = world.localInput(input.read(world.me));
       if (inp) net.send({ t: 'in', s: inp.s, k: inp.k });
     }
   }
   if (acc > TICK_MS * 4) acc = 0;
-  world.advance(now);
-  renderer.draw(world.frame(), { dt, roster, status: net?.state ?? 'idle', myName: profile?.name });
+  if (!gameEl.hidden) {
+    world.advance(now);
+    renderer.draw(world.frame(), { dt, roster, status: net.state, roomName: currentRoom?.name });
+  }
   requestAnimationFrame(frame);
 }
 
 // ---------- старт ----------
 
-// Последнее известное состояние: показываем его сразу, даже если сервер недоступен.
-const lastState = load('last', null);
-if (lastState?.raw) {
-  try {
-    world.myId = lastState.id;
-    world.push(lastState.raw);
-    world.renderTick = lastState.raw.n;
-    world.frozen = true;
-    setRoster(lastState.roster ?? []);
-  } catch {
-    world.reset();
+// Комната из ссылки (#room=…) или та, в которой вкладка была до перезагрузки.
+function roomFromUrl() {
+  const match = /room=([^&]+)/.exec(location.hash);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+async function boot() {
+  token = await acquireToken();
+  requestAnimationFrame(frame);
+  const target = roomFromUrl() || sessionLoad('room');
+  if (target && profile) {
+    enterRoom({ id: target, name: '' }, null);
+  } else {
+    showLobby();
+    if (!profile) nameInput.focus();
   }
 }
 
-requestAnimationFrame(frame);
-if (profile) start();
-else openProfile();
+boot();
 
 // Для отладки из консоли браузера.
-window.__pss = { world, roster, input, get net() { return net; } };
+window.__pss = { world, roster, input, net };

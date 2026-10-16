@@ -3,6 +3,13 @@ import { test } from 'node:test';
 import { Game } from '../server/game.js';
 import { Store } from '../server/store.js';
 import { KEY, OFFLINE_GRACE_MS } from '../public/js/shared/constants.js';
+import { RoomManager } from '../server/rooms.js';
+
+let seq = 0;
+function pilot(name, extra = {}) {
+  seq++;
+  return { token: `tok-${seq}`, id: `id${String(seq).padStart(4, '0')}`, name, color: '#41a6f6', best: 0, totalKills: 0, ...extra };
+}
 
 function fakeConn() {
   const sent = [];
@@ -18,7 +25,7 @@ function fakeConn() {
 test('сервер применяет ввод игрока по порядку и подтверждает его', () => {
   const game = new Game();
   const conn = fakeConn();
-  const p = game.join(conn, { t: 'hello', name: 'Ann' });
+  const p = game.join(conn, pilot('Ann'));
   const x0 = p.x;
   for (let s = 1; s <= 3; s++) game.handle(p, { t: 'in', s, k: KEY.RIGHT });
   game.handle(p, { t: 'in', s: 2, k: KEY.LEFT }); // устаревший — игнорируется
@@ -31,8 +38,8 @@ test('сервер применяет ввод игрока по порядку 
 
 test('бонус, который задели двое, достаётся ближайшему', () => {
   const game = new Game();
-  const a = game.join(fakeConn(), { t: 'hello', name: 'A' });
-  const b = game.join(fakeConn(), { t: 'hello', name: 'B' });
+  const a = game.join(fakeConn(), pilot('A'));
+  const b = game.join(fakeConn(), pilot('B'));
   Object.assign(a, { x: 100, y: 100 });
   Object.assign(b, { x: 104, y: 100 });
   game.powerups.push({ id: 999, type: 'weapon', x: 103, y: 100 });
@@ -44,8 +51,8 @@ test('бонус, который задели двое, достаётся бл�
 
 test('одновременное попадание: убийство первому, помощь второму', () => {
   const game = new Game({ random: () => 0.99 });
-  const a = game.join(fakeConn(), { t: 'hello', name: 'A' });
-  const b = game.join(fakeConn(), { t: 'hello', name: 'B' });
+  const a = game.join(fakeConn(), pilot('A'));
+  const b = game.join(fakeConn(), pilot('B'));
   game.enemies.push({ id: 50, type: 'drone', x: 300, y: 100, baseY: 100, hp: 1, maxHp: 1, age: 0, fireT: 9, phase: 0, dmg: {} });
   game.bullets.push({ id: 51, x: 300, y: 100, vx: 0, vy: 0, owner: a.id, enemy: false });
   game.bullets.push({ id: 52, x: 300, y: 100, vx: 0, vy: 0, owner: b.id, enemy: false });
@@ -59,8 +66,8 @@ test('конфликт правок эмблемы: проигравшему в�
   const game = new Game();
   const ca = fakeConn();
   const cb = fakeConn();
-  const a = game.join(ca, { t: 'hello', name: 'A' });
-  const b = game.join(cb, { t: 'hello', name: 'B' });
+  const a = game.join(ca, pilot('A'));
+  const b = game.join(cb, pilot('B'));
   game.handle(a, { t: 'paint', ops: [{ i: 10, c: 8, t: 5 }] });
   game.handle(b, { t: 'paint', ops: [{ i: 10, c: 12, t: 4 }] }); // b не видел правку a
   assert.equal(game.emblem.cells[10].c, 8);
@@ -74,13 +81,13 @@ test('отключившийся игрок остаётся призраком 
   let now = 1_000_000;
   const game = new Game({ now: () => now });
   const conn = fakeConn();
-  const p = game.join(conn, { t: 'hello', name: 'A' });
+  const p = game.join(conn, pilot('A'));
   p.score = 420;
   game.leave(p, conn);
   assert.equal(p.online, false);
   now += 10_000;
   game.step();
-  const again = game.join(fakeConn(), { t: 'hello', token: p.token });
+  const again = game.join(fakeConn(), { ...pilot('A'), token: p.token, id: p.id });
   assert.equal(again, p);
   assert.equal(again.score, 420);
   assert.equal(again.online, true);
@@ -89,9 +96,11 @@ test('отключившийся игрок остаётся призраком 
 test('мир, игроки и эмблема переживают перезапуск сервера', () => {
   const store = new Store(':memory:');
   let now = 1_000_000;
-  const game = new Game({ store, now: () => now });
+  const rooms = new RoomManager({ store, now: () => now });
+  const me = rooms.identify({ name: 'Persist' });
+  const game = rooms.enter('main', me);
   const conn = fakeConn();
-  const p = game.join(conn, { t: 'hello', name: 'Persist' });
+  const p = game.join(conn, me);
   Object.assign(p, { score: 777, power: 3, x: 123 });
   game.wave = 4;
   game.handle(p, { t: 'paint', ops: [{ i: 0, c: 7, t: 1 }] });
@@ -101,12 +110,13 @@ test('мир, игроки и эмблема переживают перезап
   assert.equal(game.players.size, 0);
   game.save();
 
-  const restarted = new Game({ store });
-  assert.equal(restarted.wave, 4);
-  assert.equal(restarted.emblem.cells[0].c, 7);
-  const back = restarted.join(fakeConn(), { t: 'hello', token: p.token });
-  assert.equal(back.id, p.id);
-  assert.equal(back.name, 'Persist');
+  const restarted = new RoomManager({ store });
+  const again = restarted.identify({ token: me.token, name: 'Persist' });
+  assert.equal(again.id, me.id);
+  const world = restarted.enter('main', again);
+  assert.equal(world.wave, 4);
+  assert.equal(world.emblem.cells[0].c, 7);
+  const back = world.join(fakeConn(), again);
   assert.equal(back.score, 777);
   assert.equal(back.power, 3);
   assert.equal(back.x, 123);
@@ -116,7 +126,7 @@ test('мир, игроки и эмблема переживают перезап
 test('смерть записывает забег в таблицу рекордов', () => {
   const store = new Store(':memory:');
   const game = new Game({ store });
-  const p = game.join(fakeConn(), { t: 'hello', name: 'Ace' });
+  const p = game.join(fakeConn(), pilot('Ace'));
   p.score = 300;
   p.hp = 1;
   p.invulnT = 0;

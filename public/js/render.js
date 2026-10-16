@@ -79,7 +79,7 @@ export class Renderer {
     }
   }
 
-  draw(frame, { dt, roster, status, myName }) {
+  draw(frame, { dt, roster, status, roomName }) {
     const { ctx } = this;
     ctx.save();
     if (this.shake > 0) {
@@ -108,7 +108,7 @@ export class Renderer {
       else this.flashes.set(id, t - dt);
     }
 
-    if (frame) this.drawHud(frame, roster, myName);
+    if (frame) this.drawHud(frame, roomName);
     if (this.banner) {
       this.banner.t -= dt;
       if (this.banner.t <= 0) this.banner = null;
@@ -204,7 +204,7 @@ export class Renderer {
     }
   }
 
-  drawHud(frame, roster, myName) {
+  drawHud(frame, roomName) {
     const { ctx } = this;
     const me = frame.players.find((p) => p.id === frame.myId);
     ctx.fillStyle = 'rgba(11, 13, 26, 0.7)';
@@ -232,7 +232,7 @@ export class Renderer {
       this.text(`Возвращение через ${me.respawn}`, WORLD_W / 2, WORLD_H / 2 + 4, '#fff1e8', 'center');
     }
     this.text(`СБИТО ЭСКАДРИЛЬЕЙ: ${frame.totalKills}`, 4, WORLD_H - 9, '#566c86', 'left', SMALL);
-    if (myName) this.text(myName, WORLD_W - 4, WORLD_H - 9, '#566c86', 'right', SMALL);
+    if (roomName) this.text(`КОМНАТА: ${roomName}`, WORLD_W / 2, WORLD_H - 9, '#566c86', 'center', SMALL);
   }
 
   heart(x, y, full) {
