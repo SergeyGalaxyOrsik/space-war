@@ -4,15 +4,15 @@
 const cache = new Map();
 
 const PLAYER = [
-  '..bb.........',
-  '..bab........',
-  '.fbaab.......',
-  'ffbaaaab.....',
-  'ffaaawwaaab..',
-  'ffbaaaab.....',
-  '.fbaab.......',
-  '..bab........',
-  '..bb.........',
+  '..bb............',
+  '..bab...........',
+  '.fbaab..........',
+  'ffbaaaab........',
+  'ffaaawwaaabfffff',
+  'ffbaaaab........',
+  '.fbaab..........',
+  '..bab...........',
+  '..bb............',
 ];
 
 const DRONE = [
